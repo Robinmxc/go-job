@@ -3,9 +3,9 @@ package utils
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +19,7 @@ func TestWriteFileSuccess(t *testing.T) {
 	tests := []struct {
 		name     string
 		content  []byte
-		config   WriteConfig
+		config   []WriteConfig
 		mockUser *user.User
 		wantPerm os.FileMode
 		wantUser string
@@ -27,93 +27,92 @@ func TestWriteFileSuccess(t *testing.T) {
 		{
 			name:     "Default configuration",
 			content:  []byte("test content"),
-			config:   WriteConfig{},
+			config:   nil,
 			wantPerm: 0644,
-			wantUser: "", // Current user (not explicitly set)
+			wantUser: "",
 		},
 		{
-			name:     "Custom permissions",
-			content:  []byte("custom perm"),
-			config:   WriteConfig{Perm: 0755},
+			name:    "Custom permissions",
+			content: []byte("custom perm"),
+			config: []WriteConfig{WriteConfig{
+				Perm: 0755,
+				Flag: os.O_WRONLY | os.O_CREATE | os.O_TRUNC,
+			}},
 			wantPerm: 0755,
 			wantUser: "",
 		},
 		{
-			name:     "Append mode",
-			content:  []byte("append me"),
-			config:   WriteConfig{Flag: os.O_APPEND | os.O_CREATE | os.O_WRONLY},
-			wantPerm: 0644, // Default perm still applies
+			name:    "Append mode",
+			content: []byte("append me"),
+			config: []WriteConfig{WriteConfig{
+				Flag: os.O_APPEND | os.O_CREATE | os.O_WRONLY,
+				Perm: 0644, // Explicit permissions
+			}},
+			wantPerm: 0644,
 			wantUser: "",
 		},
 		{
-			name:     "With user ownership",
-			content:  []byte("owned by testuser"),
-			config:   WriteConfig{User: "testuser"},
+			name:    "With user ownership",
+			content: []byte("owned by testuser"),
+			config: []WriteConfig{WriteConfig{
+				Perm: 0644,
+				Flag: os.O_WRONLY | os.O_CREATE | os.O_TRUNC,
+				User: "testuser",
+			}},
 			mockUser: &user.User{Uid: "1001", Gid: "1001"},
 			wantPerm: 0644,
-			wantUser: "1001", // UID of testuser
+			wantUser: "1001",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mock user looker
-			mockLooker := &MockUserLooker{
-				Users: map[string]*user.User{},
-			}
-
+			// Override user lookup
+			mockLooker := &MockUserLooker{Users: make(map[string]*user.User)}
 			if tt.mockUser != nil {
-				mockLooker.Users[tt.config.User] = tt.mockUser
+				mockLooker.Users[tt.config[0].User] = tt.mockUser
 			}
-
-			// Override user lookup for testing
 			defaultLooker = mockLooker
 
-			// Create temp file
-			tmpfile, err := ioutil.TempFile("", "test-write-")
-			if err != nil {
-				t.Fatalf("Failed to create temp file: %v", err)
-			}
-			tmpfile.Close()
-			defer os.Remove(tmpfile.Name()) // Cleanup
+			// Generate unique path without creating file
+			tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("test-write-%d", time.Now().UnixNano()))
+			defer os.Remove(tmpPath)
 
 			// Execute write
-			err = WriteFile(tmpfile.Name(), tt.content, tt.config)
+			err := WriteFile(tmpPath, tt.content, tt.config...)
 			if err != nil {
 				t.Fatalf("WriteFile() error = %v", err)
 			}
 
-			// Verify file content
-			data, err := ioutil.ReadFile(tmpfile.Name())
+			// Verify content
+			data, err := os.ReadFile(tmpPath)
 			if err != nil {
-				t.Fatalf("Failed to read file: %v", err)
+				t.Fatalf("ReadFile() error = %v", err)
 			}
 			if !bytes.Equal(data, tt.content) {
-				t.Errorf("Content mismatch. Got: %q, Want: %q", string(data), string(tt.content))
+				t.Errorf("Content mismatch: got %q, want %q", string(data), string(tt.content))
 			}
 
 			// Verify permissions
-			info, err := os.Stat(tmpfile.Name())
+			info, err := os.Stat(tmpPath)
 			if err != nil {
-				t.Fatalf("Failed to get file info: %v", err)
+				t.Fatalf("Stat() error = %v", err)
 			}
 			if info.Mode().Perm() != tt.wantPerm {
-				t.Errorf("Permissions mismatch. Got: %o, Want: %o", info.Mode().Perm(), tt.wantPerm)
+				t.Errorf("Permissions mismatch: got %o, want %o", info.Mode().Perm(), tt.wantPerm)
 			}
 
-			// Verify user ownership (if set)
-			if tt.config.User != "" {
+			// Verify ownership
+			if len(tt.config) > 0 && tt.config[0].User != "" {
 				if info.Sys() == nil {
-					t.Fatal("Could not get system-specific file info")
+					t.Fatal("Could not get system-specific info")
 				}
-
-				// This part is platform-specific and may need adjustments for non-Unix systems
-				if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-					if strconv.FormatUint(uint64(stat.Uid), 10) != tt.wantUser {
-						t.Errorf("User ownership mismatch. Got UID: %d, Want: %s", stat.Uid, tt.wantUser)
-					}
-				} else {
+				stat, ok := info.Sys().(*syscall.Stat_t)
+				if !ok {
 					t.Fatal("Could not convert to syscall.Stat_t")
+				}
+				if strconv.FormatUint(uint64(stat.Uid), 10) != tt.wantUser {
+					t.Errorf("UID mismatch: got %d, want %s", stat.Uid, tt.wantUser)
 				}
 			}
 		})
@@ -133,18 +132,24 @@ func TestWriteFileError(t *testing.T) {
 			name:    "Non-existent directory",
 			content: []byte("test"),
 			config:  WriteConfig{},
-			wantErr: "permission denied", // Assuming /nonexistent is inaccessible
+			wantErr: "no such file or directory",
 		},
 		{
 			name:    "Invalid user",
 			content: []byte("test"),
-			config:  WriteConfig{User: "unknown"},
+			config: WriteConfig{
+				Perm: 0644,
+				Flag: os.O_WRONLY | os.O_CREATE | os.O_TRUNC,
+				User: "unknown"},
 			wantErr: "user unknown not found",
 		},
 		{
-			name:     "Invalid UID",
-			content:  []byte("test"),
-			config:   WriteConfig{User: "baduser"},
+			name:    "Invalid UID",
+			content: []byte("test"),
+			config: WriteConfig{
+				Perm: 0644,
+				Flag: os.O_WRONLY | os.O_CREATE | os.O_TRUNC,
+				User: "baduser"},
 			mockUser: &user.User{Uid: "invalid", Gid: "1001"},
 			wantErr:  "invalid user ID for user baduser",
 		},
@@ -152,38 +157,26 @@ func TestWriteFileError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mock user looker
-			mockLooker := &MockUserLooker{
-				Users: map[string]*user.User{},
-			}
-
+			// Override user lookup
+			mockLooker := &MockUserLooker{Users: make(map[string]*user.User)}
 			if tt.mockUser != nil {
 				mockLooker.Users[tt.config.User] = tt.mockUser
 			}
-
-			// Override user lookup for testing
 			defaultLooker = mockLooker
 
-			// Set path to trigger error
-			path := "/nonexistent/testfile"
-			if tt.name != "Non-existent directory" {
-				tmpfile, err := os.CreateTemp("", "test-error-")
-				if err != nil {
-					t.Fatalf("Failed to create temp file: %v", err)
+			if tt.name == "Non-existent directory" {
+				err := WriteFile("/nonexistent/testfile", tt.content, tt.config)
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Error mismatch: got %v, want %q", err, tt.wantErr)
 				}
-				tmpfile.Close()
-				defer os.Remove(tmpfile.Name())
-				path = tmpfile.Name()
-			}
+			} else {
+				tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("test-error-%d", time.Now().UnixNano()))
+				defer os.Remove(tmpPath)
 
-			// Execute write
-			err := WriteFile(path, tt.content, tt.config)
-			if err == nil {
-				t.Fatal("Expected error, but got nil")
-			}
-
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("Error message mismatch. Got: %q, Want substring: %q", err.Error(), tt.wantErr)
+				err := WriteFile(tmpPath, tt.content, tt.config)
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Error mismatch: got %v, want %q", err, tt.wantErr)
+				}
 			}
 		})
 	}
@@ -222,14 +215,9 @@ func TestGenerateFileName(t *testing.T) {
 
 // TestThreadSafeWriteFile tests thread safety of file writing
 func TestThreadSafeWriteFile(t *testing.T) {
-	tmpfile, err := os.CreateTemp("", "test-threadsafe-")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	tmpfile.Close()
-	defer os.Remove(tmpfile.Name())
+	tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("test-threadsafe-%d", time.Now().UnixNano()))
+	defer os.Remove(tmpPath)
 
-	// Number of concurrent writes
 	const numWriters = 10
 	var wg sync.WaitGroup
 	wg.Add(numWriters)
@@ -239,7 +227,7 @@ func TestThreadSafeWriteFile(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			data := []byte(fmt.Sprintf("Data from goroutine %d\n", idx))
-			err := ThreadSafeWriteFile(tmpfile.Name(), data)
+			err := ThreadSafeWriteFile(tmpPath, data)
 			if err != nil {
 				t.Errorf("ThreadSafeWriteFile() error = %v", err)
 			}
@@ -248,20 +236,12 @@ func TestThreadSafeWriteFile(t *testing.T) {
 
 	wg.Wait()
 
-	// Verify the file exists and contains one of the written contents
-	_, err = os.Stat(tmpfile.Name())
+	// Verify file exists and is not empty
+	info, err := os.Stat(tmpPath)
 	if err != nil {
-		t.Fatalf("File does not exist after writes: %v", err)
+		t.Fatalf("File does not exist: %v", err)
 	}
-
-	// Note: Due to atomic renames, the file should contain exactly one write operation's data
-	// This checks that the file is not empty and has valid content
-	data, err := os.ReadFile(tmpfile.Name())
-	if err != nil {
-		t.Fatalf("Failed to read file: %v", err)
-	}
-
-	if len(data) == 0 {
+	if info.Size() == 0 {
 		t.Error("File is empty after writes")
 	}
 }
