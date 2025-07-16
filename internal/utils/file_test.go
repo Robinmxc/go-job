@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ func TestWriteFileSuccess(t *testing.T) {
 		mockUser *user.User
 		wantPerm os.FileMode
 		wantUser string
+		runtime  string
 	}{
 		{
 			name:     "Default configuration",
@@ -62,10 +64,14 @@ func TestWriteFileSuccess(t *testing.T) {
 			mockUser: &user.User{Uid: "1001", Gid: "1001"},
 			wantPerm: 0644,
 			wantUser: "1001",
+			runtime:  "linux",
 		},
 	}
 
 	for _, tt := range tests {
+		if len(tt.runtime) > 0 && runtime.GOOS != tt.runtime {
+			t.Skipf("Skipping test on %s platform, expect: %s", runtime.GOOS, tt.runtime)
+		}
 		t.Run(tt.name, func(t *testing.T) {
 			// Override user lookup
 			mockLooker := &MockUserLooker{Users: make(map[string]*user.User)}
@@ -165,6 +171,9 @@ func TestWriteFileError(t *testing.T) {
 			defaultLooker = mockLooker
 
 			if tt.name == "Non-existent directory" {
+				if runtime.GOOS != "linux" {
+					t.Skipf("Skipping test on %s platform, expect linux", runtime.GOOS)
+				}
 				err := WriteFile("/nonexistent/testfile", tt.content, tt.config)
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("Error mismatch: got %v, want %q", err, tt.wantErr)

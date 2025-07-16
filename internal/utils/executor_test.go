@@ -3,6 +3,7 @@ package utils
 import (
 	"fmt"
 	"os/user"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,7 @@ func TestExecuteCommandSuccess(t *testing.T) {
 		config   CommandConfig
 		mockUser *user.User
 		wantOut  string
+		runtime  string
 	}{
 		{
 			name: "Simple echo command",
@@ -81,10 +83,14 @@ func TestExecuteCommandSuccess(t *testing.T) {
 			},
 			mockUser: &user.User{Uid: "0", Gid: "0"},
 			wantOut:  "root\n",
+			runtime:  "linux",
 		},
 	}
 
 	for _, tt := range tests {
+		if len(tt.runtime) > 0 && runtime.GOOS != tt.runtime {
+			t.Skipf("Skipping test on %s platform, expect: %s", runtime.GOOS, tt.runtime)
+		}
 		t.Run(tt.name, func(t *testing.T) {
 			// Create mock user looker
 			mockLooker := &MockUserLooker{
@@ -150,6 +156,7 @@ func TestExecuteCommandError(t *testing.T) {
 		name    string
 		config  CommandConfig
 		wantErr string
+		runtime string
 	}{
 		{
 			name: "Non-existent command",
@@ -167,16 +174,29 @@ func TestExecuteCommandError(t *testing.T) {
 			wantErr: "no such file or directory",
 		},
 		{
-			name: "Command failure",
+			name: "Command failure (linux)",
 			config: CommandConfig{
 				Command: "ls",
 				Args:    []string{"/non-existent-file"},
 			},
 			wantErr: "exit status 2",
+			runtime: "linux",
+		},
+		{
+			name: "Command failure (darwin)",
+			config: CommandConfig{
+				Command: "ls",
+				Args:    []string{"/non-existent-file"},
+			},
+			wantErr: "exit status 1",
+			runtime: "darwin",
 		},
 	}
 
 	for _, tt := range tests {
+		if len(tt.runtime) > 0 && runtime.GOOS != tt.runtime {
+			t.Skipf("Skipping test on %s platform, expect: %s", runtime.GOOS, tt.runtime)
+		}
 		t.Run(tt.name, func(t *testing.T) {
 			// Override user lookup for testing
 			defaultLooker = &MockUserLooker{}
