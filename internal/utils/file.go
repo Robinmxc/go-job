@@ -8,6 +8,76 @@ import (
 	"time"
 )
 
+// FileInfo holds information about a file or directory entry
+type FileInfo struct {
+	Path     string     // Full path to the entry
+	IsDir    bool       // Whether the entry is a directory
+	Content  []byte     // File content (only for files, nil for directories)
+	Children []FileInfo // Child entries (only for directories, recursive)
+	Error    error      // Error encountered when processing this entry
+}
+
+// ReadFileOrDir reads a file or directory (non-recursive for directories):
+// - For files: returns content in Content field
+// - For directories: returns list of direct child entries (files and subdirectories) in Children field
+// Args:
+//   - path: Target file or directory path to read
+//
+// Returns:
+//   - FileInfo: Struct containing entry details, content (if file), direct children (if directory), and any error
+func ReadFileOrDir(path string) FileInfo {
+	info, err := os.Stat(path)
+	if err != nil {
+		return FileInfo{Path: path, Error: err}
+	}
+
+	if !info.IsDir() {
+		// Handle regular file: read content
+		content, err := os.ReadFile(path)
+		return FileInfo{
+			Path:    path,
+			IsDir:   false,
+			Content: content,
+			Error:   err,
+		}
+	}
+
+	// Handle directory: list only direct children (non-recursive)
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return FileInfo{Path: path, IsDir: true, Error: err}
+	}
+
+	var children []FileInfo
+	for _, entry := range entries {
+		childPath := filepath.Join(path, entry.Name())
+		// Get basic info for child without recursive reading
+		childInfo, err := os.Stat(childPath)
+		if err != nil {
+			children = append(children, FileInfo{
+				Path:  childPath,
+				IsDir: false, // Default to false, error will indicate issue
+				Error: err,
+			})
+			continue
+		}
+
+		// For child entries, only populate basic info (no content/children)
+		children = append(children, FileInfo{
+			Path:  childPath,
+			IsDir: childInfo.IsDir(),
+			Error: nil,
+		})
+	}
+
+	return FileInfo{
+		Path:     path,
+		IsDir:    true,
+		Children: children,
+		Error:    nil,
+	}
+}
+
 // WriteConfig defines customizable parameters for file writing operations
 type WriteConfig struct {
 	Perm os.FileMode // File permission bits (e.g., 0644, 0755)

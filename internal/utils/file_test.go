@@ -15,6 +15,153 @@ import (
 	"time"
 )
 
+// TestReadFileOrDir tests the ReadFileOrDir function for files and directories
+func TestReadFileOrDir(t *testing.T) {
+	// Create temporary test directory
+	testDir, err := os.MkdirTemp("", "read-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(testDir) // Cleanup
+
+	// Create test files and directories
+	testFile := filepath.Join(testDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create subdirectory (won't be read recursively)
+	subDir := filepath.Join(testDir, "subdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatalf("Failed to create subdir: %v", err)
+	}
+
+	// Create file inside subdirectory (should not appear in top-level dir read)
+	subFile := filepath.Join(subDir, "subfile.txt")
+	if err := os.WriteFile(subFile, []byte("hidden content"), 0644); err != nil {
+		t.Fatalf("Failed to create subfile: %v", err)
+	}
+
+	// Create another top-level file
+	anotherFile := filepath.Join(testDir, "another.log")
+	if err := os.WriteFile(anotherFile, []byte("log data"), 0644); err != nil {
+		t.Fatalf("Failed to create another file: %v", err)
+	}
+
+	tests := []struct {
+		name              string
+		path              string
+		wantIsDir         bool
+		wantErr           bool
+		wantChildrenCount int    // For directories only
+		wantContent       string // For files only
+	}{
+		{
+			name:        "Read regular file",
+			path:        testFile,
+			wantIsDir:   false,
+			wantErr:     false,
+			wantContent: "hello world",
+		},
+		{
+			name:              "Read directory (non-recursive)",
+			path:              testDir,
+			wantIsDir:         true,
+			wantErr:           false,
+			wantChildrenCount: 3, // test.txt + subdir + another.log
+		},
+		{
+			name:        "Read another regular file",
+			path:        anotherFile,
+			wantIsDir:   false,
+			wantErr:     false,
+			wantContent: "log data",
+		},
+		{
+			name:      "Read non-existent path",
+			path:      filepath.Join(testDir, "nonexistent"),
+			wantIsDir: false,
+			wantErr:   true,
+		},
+		{
+			name:              "Read subdirectory directly",
+			path:              subDir,
+			wantIsDir:         true,
+			wantErr:           false,
+			wantChildrenCount: 1, // Only subfile.txt
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ReadFileOrDir(tt.path)
+
+			// Verify error state
+			if (result.Error != nil) != tt.wantErr {
+				t.Errorf("Error mismatch: got %v, wantErr %v", result.Error, tt.wantErr)
+				return
+			}
+
+			// Verify directory flag
+			if result.IsDir != tt.wantIsDir {
+				t.Errorf("IsDir mismatch: got %v, want %v", result.IsDir, tt.wantIsDir)
+			}
+
+			// Verify file content for files
+			if !tt.wantIsDir && !tt.wantErr {
+				if string(result.Content) != tt.wantContent {
+					t.Errorf("Content mismatch: got %q, want %q", string(result.Content), tt.wantContent)
+				}
+				// Files should have no children
+				if len(result.Children) != 0 {
+					t.Errorf("Files should have no children: got %d children", len(result.Children))
+				}
+			}
+
+			// Verify children count for directories
+			if tt.wantIsDir && !tt.wantErr {
+				if len(result.Children) != tt.wantChildrenCount {
+					t.Errorf("Children count mismatch: got %d, want %d", len(result.Children), tt.wantChildrenCount)
+				}
+
+				// Verify all children have correct paths and types
+				childNames := make(map[string]bool)
+				for _, child := range result.Children {
+					childName := filepath.Base(child.Path)
+					childNames[childName] = true
+
+					// Check if child is a directory when expected
+					switch childName {
+					case "subdir":
+						if !child.IsDir {
+							t.Errorf("Child %q should be a directory", childName)
+						}
+					case "test.txt", "another.log", "subfile.txt":
+						if child.IsDir {
+							t.Errorf("Child %q should be a file", childName)
+						}
+					}
+				}
+
+				// Verify all expected children exist
+				switch tt.path {
+				case testDir:
+					expected := map[string]bool{"test.txt": true, "subdir": true, "another.log": true}
+					for name := range expected {
+						if !childNames[name] {
+							t.Errorf("Missing expected child: %q", name)
+						}
+					}
+				case subDir:
+					if !childNames["subfile.txt"] {
+						t.Errorf("Missing expected child in subdir: subfile.txt")
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestWriteFileSuccess tests successful file writes with different configurations
 func TestWriteFileSuccess(t *testing.T) {
 	tests := []struct {
